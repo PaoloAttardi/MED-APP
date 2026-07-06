@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="it">
+  <head>
+    <meta charset="UTF-8" />
+    <script>
+      // Redirect SPA: converte il path in query string per index.html
+      const path = window.location.pathname.replace('/MED-APP', '') + window.location.search;
+      window.location.replace('/MED-APP/?redirect=' + encodeURIComponent(path));
+    </script>
+  </head>
+  <body></body>
+</html>
