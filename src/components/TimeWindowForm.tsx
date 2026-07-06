@@ -271,7 +271,7 @@ export const TimeWindowForm: React.FC<TimeWindowFormProps> = ({ drugId, onBack }
                 type="number"
                 className="form-control"
                 value={dose}
-                onChange={(e) => setDose(Math.max(1, parseInt(e.target.value) || 1))}
+                onChange={(e) => setDose(parseInt(e.target.value))}
                 min="1"
               />
               {errors.dose && <div className="form-error">{errors.dose}</div>}
