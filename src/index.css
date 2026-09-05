@@ -205,6 +205,13 @@ h1, h2, h3, h4, h5, h6 {
   border-radius: var(--radius-md);
 }
 
+/* Icon-only buttons must ignore btn-small padding so the glyph stays centered */
+.btn.btn-icon,
+.btn-icon.btn-small {
+  padding: 0;
+  flex-shrink: 0;
+}
+
 .btn-small {
   padding: 0.5rem 1rem;
   font-size: 0.85rem;

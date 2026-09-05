@@ -1,5 +1,5 @@
 const DB_NAME = 'medtracker_db';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 export function openDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -34,6 +34,12 @@ export function openDatabase(): Promise<IDBDatabase> {
         store.createIndex('drug_id', 'drug_id', { unique: false });
         store.createIndex('time_window_id', 'time_window_id', { unique: false });
         store.createIndex('scheduled_datetime', 'scheduled_datetime', { unique: false });
+      }
+
+      // Shared log used by both page and Service Worker to avoid firing the
+      // same reminder more than once per window per day
+      if (!db.objectStoreNames.contains('notification_log')) {
+        db.createObjectStore('notification_log', { keyPath: 'key' });
       }
     };
   });

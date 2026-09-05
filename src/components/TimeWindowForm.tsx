@@ -268,10 +268,15 @@ export const TimeWindowForm: React.FC<TimeWindowFormProps> = ({ drugId, onBack }
             <div className="form-group" style={{ flex: 1 }}>
               <label className="form-label">Dose ({drug?.unit_label})</label>
               <input
-                type="number"
+                type="text"
+                inputMode="numeric"
+                pattern="[0-9]*"
                 className="form-control"
-                value={dose}
-                onChange={(e) => setDose(parseInt(e.target.value))}
+                value={dose === 0 ? '' : String(dose)}
+                onChange={(e) => {
+                  const v = e.target.value.replace(/[^0-9]/g, '');
+                  setDose(v === '' ? 0 : parseInt(v, 10));
+                }}
                 min="1"
               />
               {errors.dose && <div className="form-error">{errors.dose}</div>}

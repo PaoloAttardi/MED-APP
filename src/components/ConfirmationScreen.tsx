@@ -213,13 +213,16 @@ export const ConfirmationScreen: React.FC<ConfirmationScreenProps> = ({ drugId, 
             <div className="form-group">
               <label className="form-label">Dose effettivamente assunta</label>
               <input
-                type="number"
+                type="text"
+                inputMode="numeric"
+                pattern="[0-9]*"
                 className="form-control"
                 style={{ fontSize: '1.25rem', textAlign: 'center' }}
-                value={actualDose || ''}
+                value={actualDose === 0 ? '' : String(actualDose)}
                 onChange={(e) => {
                   setError('');
-                  setActualDose(Math.max(0, parseInt(e.target.value) || 0));
+                  const v = e.target.value.replace(/[^0-9]/g, '');
+                  setActualDose(v === '' ? 0 : parseInt(v, 10));
                 }}
                 min="0"
               />

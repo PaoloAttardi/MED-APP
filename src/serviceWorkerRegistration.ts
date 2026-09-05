@@ -8,6 +8,8 @@ export function registerServiceWorker(onUpdate?: (registration: ServiceWorkerReg
         .then((registration) => {
           console.log('Service Worker registered successfully:', registration.scope);
 
+          registerPeriodicSync(registration);
+
           // Check for updates
           registration.addEventListener('updatefound', () => {
             const installingWorker = registration.installing;
@@ -31,6 +33,34 @@ export function registerServiceWorker(onUpdate?: (registration: ServiceWorkerReg
           console.error('Service Worker registration failed:', error);
         });
     });
+  }
+}
+
+// Best-effort wake-up of the Service Worker on Android (Chrome).
+// Not supported on iOS; the permission is not user-grantable, so no prompt appears.
+async function registerPeriodicSync(registration: ServiceWorkerRegistration): Promise<void> {
+  const sw = registration as ServiceWorkerRegistration & {
+    periodicSync?: { register: (tag: string, options: { minInterval: number }) => Promise<void> };
+  };
+
+  if (!sw.periodicSync) {
+    console.warn('Periodic Background Sync not supported in this browser.');
+    return;
+  }
+
+  try {
+    const permission = await (navigator.permissions as unknown as {
+      query: (desc: { name: string }) => Promise<{ state: string }>;
+    }).query({ name: 'periodic-background-sync' });
+
+    if (permission.state === 'granted') {
+      await sw.periodicSync.register('medtracker-sync', { minInterval: 60 * 60 * 1000 });
+      console.log('Periodic Background Sync registered (best effort).');
+    } else {
+      console.warn('Periodic Background Sync permission denied:', permission.state);
+    }
+  } catch (err) {
+    console.warn('Unable to register PeriodSyncBackground:', err);
   }
 }
 

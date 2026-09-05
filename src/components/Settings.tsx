@@ -90,7 +90,7 @@ export const Settings: React.FC<SettingsProps> = ({ onBack, onPermissionChanged 
         <div className="settings-section">
           <h3 className="settings-section-title">Permessi Notifiche</h3>
           
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'rgba(255,255,255,0.02)', padding: '1rem', borderRadius: '12px', border: '1px solid var(--border-color)' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '1rem', background: 'rgba(255,255,255,0.02)', padding: '1rem', borderRadius: '12px', border: '1px solid var(--border-color)' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
               {permission === 'granted' ? (
                 <Bell size={24} className="text-primary" />
@@ -119,6 +119,7 @@ export const Settings: React.FC<SettingsProps> = ({ onBack, onPermissionChanged 
                 type="button" 
                 onClick={handleRequestPermission} 
                 className="btn btn-primary btn-small"
+                style={{ alignSelf: 'center', flexShrink: 0, lineHeight: 1, whiteSpace: 'nowrap' }}
               >
                 Abilita
               </button>
@@ -140,10 +141,15 @@ export const Settings: React.FC<SettingsProps> = ({ onBack, onPermissionChanged 
               </span>
             </div>
             <input
-              type="number"
+              type="text"
+              inputMode="numeric"
+              pattern="[0-9]*"
               className="form-control"
-              value={threshold}
-              onChange={(e) => setThreshold(parseInt(e.target.value) || 0)}
+              value={threshold === 0 ? '' : String(threshold)}
+              onChange={(e) => {
+                const v = e.target.value.replace(/[^0-9]/g, '');
+                setThreshold(v === '' ? 0 : parseInt(v, 10));
+              }}
               min="1"
             />
             {errors.threshold && <div className="form-error">{errors.threshold}</div>}

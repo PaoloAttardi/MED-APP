@@ -341,14 +341,17 @@ export const Dashboard: React.FC<DashboardProps> = ({
                 {/* Inline Refill Quick Access */}
                 <div style={{ marginTop: '1rem', display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
                   <input
-                    type="number"
+                    type="text"
+                    inputMode="numeric"
+                    pattern="[0-9]*"
                     className="form-control"
                     placeholder="Aggiungi scorta (+)"
                     style={{ padding: '0.4rem 0.8rem', fontSize: '0.85rem' }}
-                    value={refillDeltas[drug.id] || ''}
+                    value={refillDeltas[drug.id] ? String(refillDeltas[drug.id]) : ''}
                     min="1"
                     onChange={(e) => {
-                      const val = parseInt(e.target.value) || 0;
+                      const v = e.target.value.replace(/[^0-9]/g, '');
+                      const val = v === '' ? 0 : parseInt(v, 10);
                       setRefillDeltas(prev => ({ ...prev, [drug.id]: val }));
                     }}
                   />

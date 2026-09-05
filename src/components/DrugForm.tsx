@@ -164,11 +164,16 @@ export const DrugForm: React.FC<DrugFormProps> = ({ drugId, onBack, onSaved }) =
           <div className="form-group">
             <label className="form-label">Scorta Iniziale (unità)</label>
             <input
-              type="number"
+              type="text"
+              inputMode="numeric"
+              pattern="[0-9]*"
               className="form-control"
               placeholder="es. 30"
-              value={initialStock || ''}
-              onChange={(e) => setInitialStock(parseInt(e.target.value) || 0)}
+              value={initialStock === 0 ? '' : String(initialStock)}
+              onChange={(e) => {
+                const v = e.target.value.replace(/[^0-9]/g, '');
+                setInitialStock(v === '' ? 0 : parseInt(v, 10));
+              }}
               min="0"
             />
             {errors.initialStock && <div className="form-error">{errors.initialStock}</div>}
@@ -185,11 +190,16 @@ export const DrugForm: React.FC<DrugFormProps> = ({ drugId, onBack, onSaved }) =
             <div className="form-group">
               <label className="form-label">Aggiungi pasticche (Rifornimento)</label>
               <input
-                type="number"
+                type="text"
+                inputMode="numeric"
+                pattern="[0-9]*"
                 className="form-control"
                 placeholder="es. +20"
-                value={refillDelta || ''}
-                onChange={(e) => setRefillDelta(Math.max(0, parseInt(e.target.value) || 0))}
+                value={refillDelta === 0 ? '' : String(refillDelta)}
+                onChange={(e) => {
+                  const v = e.target.value.replace(/[^0-9]/g, '');
+                  setRefillDelta(v === '' ? 0 : parseInt(v, 10));
+                }}
                 min="0"
                 disabled={isCorrecting}
               />
@@ -224,12 +234,14 @@ export const DrugForm: React.FC<DrugFormProps> = ({ drugId, onBack, onSaved }) =
                   </span>
                 </div>
                 <input
-                  type="number"
+                  type="text"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
                   className="form-control"
                   style={{ borderColor: 'var(--danger)' }}
                   placeholder="es. 15"
                   value={correctedStock}
-                  onChange={(e) => setCorrectedStock(e.target.value)}
+                  onChange={(e) => setCorrectedStock(e.target.value.replace(/[^0-9]/g, ''))}
                   min="0"
                 />
                 {errors.correctedStock && <div className="form-error">{errors.correctedStock}</div>}

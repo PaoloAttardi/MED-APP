@@ -1,4 +1,4 @@
-const CACHE_NAME = 'medtracker-cache-v1';
+const CACHE_NAME = 'medtracker-cache-v2';
 
 // Assets to precache on install
 const PRECACHE_ASSETS = [
@@ -9,10 +9,47 @@ const PRECACHE_ASSETS = [
   './icon-512.png'
 ];
 
+// Resolve an asset path relative to the SW registration scope so it works
+// regardless of the configured base path (e.g. "/MED-APP/")
+function assetUrl(path) {
+  return new URL(path, self.registration.scope).href;
+}
+
+// String helpers to compute local date/time without pulling in dependencies
+function pad2(n) {
+  return String(n).padStart(2, '0');
+}
+
+function getLocalDateString(date) {
+  const d = date || new Date();
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+}
+
+function getHoursMinutesString(date) {
+  const d = date || new Date();
+  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+
+// Active period of an intake window = [notification time, next window / 23:59:59]
+function windowActiveRange(window, sortedWindows, dateStr) {
+  const start = new Date(`${dateStr}T${window.notification_time}:00`);
+  const currentIndex = sortedWindows.findIndex((w) => w.id === window.id);
+  let end;
+
+  if (currentIndex < sortedWindows.length - 1) {
+    const nextWindow = sortedWindows[currentIndex + 1];
+    end = new Date(`${dateStr}T${nextWindow.notification_time}:00`);
+  } else {
+    end = new Date(`${dateStr}T23:59:59`);
+  }
+
+  return { start, end };
+}
+
 // Open IndexedDB database (duplicate connection logic for SW context in pure JS)
 function openDB() {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open('medtracker_db', 1);
+    const request = indexedDB.open('medtracker_db', 2);
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
     request.onupgradeneeded = () => {
@@ -30,6 +67,9 @@ function openDB() {
         store.createIndex('time_window_id', 'time_window_id', { unique: false });
         store.createIndex('scheduled_datetime', 'scheduled_datetime', { unique: false });
       }
+      if (!db.objectStoreNames.contains('notification_log')) {
+        db.createObjectStore('notification_log', { keyPath: 'key' });
+      }
     };
   });
 }
@@ -39,6 +79,16 @@ function getFromStore(db, storeName, id) {
     const tx = db.transaction(storeName, 'readonly');
     const store = tx.objectStore(storeName);
     const request = store.get(id);
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+function getAllFromStore(db, storeName) {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(storeName, 'readonly');
+    const store = tx.objectStore(storeName);
+    const request = store.getAll();
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });
@@ -64,13 +114,6 @@ function addInStore(db, storeName, item) {
   });
 }
 
-function getSettingsFromLocalStorage() {
-  // Service Workers do NOT have access to localStorage, so we will use a fallback or store settings in IndexedDB.
-  // Wait, the settings schema specifies localStorage. For SW fallback, we will assume default settings:
-  // low_stock_threshold_days = 4.
-  return { low_stock_threshold_days: 4 };
-}
-
 function getAllFromIndex(db, storeName, indexName, key) {
   return new Promise((resolve, reject) => {
     const tx = db.transaction(storeName, 'readonly');
@@ -79,6 +122,130 @@ function getAllFromIndex(db, storeName, indexName, key) {
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });
+}
+
+// Shared dedupe with the page scheduler: never fire the same reminder twice
+function getLogKey(db, key) {
+  return getFromStore(db, 'notification_log', key);
+}
+
+function putLogKey(db, key) {
+  return putInStore(db, 'notification_log', { key, fired_at: new Date().toISOString() });
+}
+
+// True if a CONFIRMED or SKIPPED_VOLUNTARY event exists for the window on the date
+async function hasConfirmationEvent(db, drugId, windowId, dateStr) {
+  const events = await getAllFromIndex(db, 'dose_events', 'time_window_id', windowId);
+  return events.some(
+    (e) =>
+      e.drug_id === drugId &&
+      e.scheduled_datetime.startsWith(dateStr) &&
+      (e.event_type === 'CONFIRMED' || e.event_type === 'SKIPPED_VOLUNTARY')
+  );
+}
+
+// Best-effort dose reminders while the app is not open (Android / Chrome only,
+// driven by Periodic Background Sync). Same catch-up + dedupe semantics as the page.
+async function runDoseReminders(db) {
+  if (!('Notification' in self) || Notification.permission !== 'granted') {
+    return;
+  }
+
+  const drugs = await getAllFromStore(db, 'drugs');
+  const todayStr = getLocalDateString();
+  const now = new Date();
+
+  for (const drug of drugs) {
+    const windows = await getAllFromIndex(db, 'time_windows', 'drug_id', drug.id);
+    const sorted = windows
+      .filter((w) => w.notification_enabled)
+      .sort((a, b) => a.notification_time.localeCompare(b.notification_time));
+
+    for (const win of sorted) {
+      const { start, end } = windowActiveRange(win, sorted, todayStr);
+      if (now < start || now >= end) continue;
+
+      const logKey = `dose:${win.id}:${todayStr}`;
+      if (await getLogKey(db, logKey)) continue;
+
+      if (await hasConfirmationEvent(db, drug.id, win.id, todayStr)) continue;
+
+      try {
+        self.registration.showNotification(`Ora del farmaco: ${drug.name}`, {
+          body: `${win.label} ÔÇö ${win.dose_per_intake} ${drug.unit_label}`,
+          icon: assetUrl('icon-192.png'),
+          badge: assetUrl('icon-192.png'),
+          tag: `dose-reminder-${drug.id}-${win.id}-${todayStr}`,
+          data: {
+            drugId: drug.id,
+            windowId: win.id,
+            scheduledDateTime: `${todayStr}T${win.notification_time}:00`
+          },
+          actions: [
+            { action: 'confirm', title: 'Ho preso la dose' },
+            { action: 'open', title: 'Apri app' }
+          ],
+          requireInteraction: true
+        });
+        await putLogKey(db, logKey);
+      } catch (err) {
+        console.error('SW: failed to show reminder notification:', err);
+      }
+    }
+  }
+}
+
+// Look back up to 5 days and log skipped windows missed while the app was closed
+async function runImplicitSkips(db) {
+  const drugs = await getAllFromStore(db, 'drugs');
+  const now = new Date();
+
+  for (let dayOffset = 0; dayOffset <= 5; dayOffset++) {
+    const targetDate = new Date();
+    targetDate.setDate(now.getDate() - dayOffset);
+    const dateStr = getLocalDateString(targetDate);
+
+    for (const drug of drugs) {
+      const windows = await getAllFromIndex(db, 'time_windows', 'drug_id', drug.id);
+      if (windows.length === 0) continue;
+
+      const sorted = [...windows].sort((a, b) => a.notification_time.localeCompare(b.notification_time));
+
+      for (const win of sorted) {
+        const { end } = windowActiveRange(win, sorted, dateStr);
+        if (now <= end) continue;
+
+        const events = await getAllFromIndex(db, 'dose_events', 'time_window_id', win.id);
+        const hasEvent = events.some(
+          (e) => e.drug_id === drug.id && e.scheduled_datetime.startsWith(dateStr)
+        );
+        if (hasEvent) continue;
+
+        await addInStore(db, 'dose_events', {
+          id: crypto.randomUUID(),
+          drug_id: drug.id,
+          time_window_id: win.id,
+          event_type: 'SKIPPED_IMPLICIT',
+          planned_dose: win.dose_per_intake,
+          actual_dose: 0,
+          scheduled_datetime: `${dateStr}T${win.notification_time}:00`,
+          confirmed_at: end.toISOString(),
+          stock_after: drug.current_stock
+        });
+        console.log(`SW: logged implicit skip for ${drug.name} - ${win.label} on ${dateStr}`);
+      }
+    }
+  }
+}
+
+async function runPeriodicChecks() {
+  try {
+    const db = await openDB();
+    await runImplicitSkips(db);
+    await runDoseReminders(db);
+  } catch (err) {
+    console.error('SW: periodic checks failed:', err);
+  }
 }
 
 // SW Install Event: Precache core assets
@@ -132,6 +299,13 @@ self.addEventListener('fetch', (event) => {
   );
 });
 
+// Best-effort wake-up used only on Android (Chrome). iOS Safari has no support.
+self.addEventListener('periodicsync', (event) => {
+  if (event.tag === 'medtracker-sync') {
+    event.waitUntil(runPeriodicChecks());
+  }
+});
+
 // SW Notification Click Event: Handle "Ho preso la dose" quick-confirm and "Apri app"
 self.addEventListener('notificationclick', (event) => {
   const notification = event.notification;
@@ -146,7 +320,7 @@ self.addEventListener('notificationclick', (event) => {
       openDB().then(async (db) => {
         const drug = await getFromStore(db, 'drugs', data.drugId);
         const window = await getFromStore(db, 'time_windows', data.windowId);
-        
+
         if (!drug || !window) {
           console.error('Drug or window not found in SW');
           return;
@@ -155,9 +329,9 @@ self.addEventListener('notificationclick', (event) => {
         // Idempotency check: see if a confirmed event already exists for today
         const scheduledDatePart = data.scheduledDateTime.split('T')[0];
         const existingEvents = await getAllFromIndex(db, 'dose_events', 'time_window_id', data.windowId);
-        const alreadyConfirmed = existingEvents.some(e => 
-          e.drug_id === data.drugId && 
-          e.scheduled_datetime.startsWith(scheduledDatePart) && 
+        const alreadyConfirmed = existingEvents.some(e =>
+          e.drug_id === data.drugId &&
+          e.scheduled_datetime.startsWith(scheduledDatePart) &&
           (e.event_type === 'CONFIRMED' || e.event_type === 'SKIPPED_VOLUNTARY')
         );
 
@@ -168,7 +342,7 @@ self.addEventListener('notificationclick', (event) => {
 
         const actualDose = window.dose_per_intake;
         const newStock = Math.max(0, drug.current_stock - actualDose);
-        
+
         // Save CONFIRMED event
         const now = new Date().toISOString();
         const eventId = crypto.randomUUID();
@@ -197,7 +371,7 @@ self.addEventListener('notificationclick', (event) => {
         const enabledWindows = timeWindows.filter(tw => tw.notification_enabled);
         const dailyDose = enabledWindows.reduce((sum, tw) => sum + tw.dose_per_intake, 0);
         const autonomy = dailyDose > 0 ? Math.floor(newStock / dailyDose) : Infinity;
-        
+
         // Use threshold 4 as fallback since SW can't read localStorage directly (safely)
         const isLowStock = autonomy <= 4;
         let lowStockEntered = false;
@@ -224,9 +398,9 @@ self.addEventListener('notificationclick', (event) => {
 
         // Trigger a native notification for low stock in background if entered
         if (lowStockEntered) {
-          self.registration.showNotification(`⚠️ Scorta in esaurimento: ${drug.name}`, {
-            body: `La scorta si esaurirà tra circa ${autonomy} giorni. Apri l'app per salvare l'evento in calendario.`,
-            icon: '/icon-192.png',
+          self.registration.showNotification(`ÔÜá´©Å Scorta in esaurimento: ${drug.name}`, {
+            body: `La scorta si esaurir├á tra circa ${autonomy} giorni. Apri l'app per salvare l'evento in calendario.`,
+            icon: assetUrl('icon-192.png'),
             tag: `low-stock-${drug.id}`,
             data: { drugId: drug.id }
           });
@@ -245,9 +419,9 @@ self.addEventListener('notificationclick', (event) => {
             return client.focus();
           }
         }
-        // If not open, open a new tab
+        // If not open, open a new tab at the app scope
         if (self.clients.openWindow) {
-          return self.clients.openWindow('./');
+          return self.clients.openWindow(self.registration.scope);
         }
       })
     );

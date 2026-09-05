@@ -2,6 +2,7 @@ import type { TimeWindow } from '../types';
 import { drugRepository, timeWindowRepository, doseEventRepository } from '../db/repositories';
 import { getSettings } from './settings';
 import { evaluateStockStatus } from './stockEngine';
+import { isNotificationFired, markNotificationFired, pruneNotificationLog } from './notificationLog';
 
 // Get YYYY-MM-DD in local time
 export function getLocalDateString(date: Date = new Date()): string {
@@ -15,6 +16,12 @@ export function getHoursMinutesString(date: Date = new Date()): string {
   const hh = String(date.getHours()).padStart(2, '0');
   const mm = String(date.getMinutes()).padStart(2, '0');
   return `${hh}:${mm}`;
+}
+
+// Resolve an asset path relative to the Service Worker scope, so it works
+// regardless of the configured base path (e.g. "/MED-APP/")
+function scopeAssetUrl(reg: ServiceWorkerRegistration, path: string): string {
+  return new URL(path, reg.scope).href;
 }
 
 // Function to calculate the end time of a window
@@ -50,42 +57,54 @@ export const notificationScheduler = {
     const reg = await navigator.serviceWorker.ready;
     if (!reg) return;
 
+    const iconUrl = scopeAssetUrl(reg, 'icon-192.png');
     const drugs = await drugRepository.getAll();
     const todayStr = getLocalDateString();
-    const currentHHMM = getHoursMinutesString();
+    const now = new Date();
 
     for (const drug of drugs) {
-      const windows = await timeWindowRepository.getByDrugId(drug.id);
-      
-      for (const win of windows) {
+      const sortedWindows = await timeWindowRepository.getByDrugId(drug.id);
+      if (sortedWindows.length === 0) continue;
+
+      for (const win of sortedWindows) {
         if (!win.notification_enabled) continue;
 
-        // If the scheduled notification time is exactly the current time (HH:MM)
-        if (win.notification_time === currentHHMM) {
-          // Check if dose event (any type) already exists for this window today
-          const alreadyLogged = await doseEventRepository.existsConfirmedForWindow(drug.id, win.id, todayStr);
-          
-          if (!alreadyLogged) {
-            // Show the notification using the SW registration so click actions are caught by sw.js
-            const tag = `dose-reminder-${drug.id}-${win.id}-${todayStr}`;
-            
-            reg.showNotification(`Ora del farmaco: ${drug.name}`, {
-              body: `${win.label} — ${win.dose_per_intake} ${drug.unit_label}`,
-              icon: '/icon-192.png',
-              badge: '/icon-192.png',
-              tag,
-              data: {
-                drugId: drug.id,
-                windowId: win.id,
-                scheduledDateTime: `${todayStr}T${win.notification_time}:00`
-              },
-              actions: [
-                { action: 'confirm', title: 'Ho preso la dose' },
-                { action: 'open', title: 'Apri app' }
-              ],
-              requireInteraction: true
-            } as any);
-          }
+        // Fire while the intake window is still open: this also covers catch-up
+        // when the app is (re)opened after the exact HH:MM has already passed.
+        const { start, end } = getWindowActiveRange(win, sortedWindows, todayStr);
+        if (now < start || now >= end) continue;
+
+        // Once-per-window-per-day dedupe, shared with the Service Worker
+        const firedKey = `dose:${win.id}:${todayStr}`;
+        if (await isNotificationFired(firedKey)) continue;
+
+        // Check if dose event (any type) already exists for this window today
+        const alreadyLogged = await doseEventRepository.existsConfirmedForWindow(drug.id, win.id, todayStr);
+        if (alreadyLogged) continue;
+
+        // Show the notification using the SW registration so click actions are caught by sw.js
+        const tag = `dose-reminder-${drug.id}-${win.id}-${todayStr}`;
+
+        try {
+          await reg.showNotification(`Ora del farmaco: ${drug.name}`, {
+            body: `${win.label} — ${win.dose_per_intake} ${drug.unit_label}`,
+            icon: iconUrl,
+            badge: iconUrl,
+            tag,
+            data: {
+              drugId: drug.id,
+              windowId: win.id,
+              scheduledDateTime: `${todayStr}T${win.notification_time}:00`
+            },
+            actions: [
+              { action: 'confirm', title: 'Ho preso la dose' },
+              { action: 'open', title: 'Apri app' }
+            ],
+            requireInteraction: true
+          } as any);
+          await markNotificationFired(firedKey);
+        } catch (err) {
+          console.error('Failed to show reminder notification:', err);
         }
       }
     }
@@ -145,6 +164,8 @@ export const notificationScheduler = {
     const reg = await navigator.serviceWorker.ready;
     if (!reg) return;
 
+    const iconUrl = scopeAssetUrl(reg, 'icon-192.png');
+
     // Check low stock once a day, e.g., at 09:00 (if app is running)
     const currentHHMM = getHoursMinutesString();
     if (currentHHMM !== '09:00') {
@@ -163,8 +184,8 @@ export const notificationScheduler = {
       const status = evaluateStockStatus(drug, windows, settings.low_stock_threshold_days);
       if (!status.isLowStock || status.autonomy === Infinity || !status.stockOutDate) continue;
 
-      const notifKey = `low_stock_notif_fired_${drug.id}_${todayStr}`;
-      const alreadyFiredToday = localStorage.getItem(notifKey) === 'true';
+      const firedKey = `low:${drug.id}:${todayStr}`;
+      const alreadyFiredToday = await isNotificationFired(firedKey);
       if (alreadyFiredToday) continue;
 
       // Evaluate frequency condition
@@ -193,19 +214,24 @@ export const notificationScheduler = {
 
         reg.showNotification(`⚠️ ${drug.name}: scorta quasi esaurita`, {
           body: bodyText,
-          icon: '/icon-192.png',
-          badge: '/icon-192.png',
+          icon: iconUrl,
+          badge: iconUrl,
           tag: `low-stock-${drug.id}-${todayStr}`,
           data: { drugId: drug.id }
         });
 
-        localStorage.setItem(notifKey, 'true');
+        await markNotificationFired(firedKey);
       }
     }
   },
 
   // Start the background interval (runs every 60s)
   start(onTick?: () => void) {
+    // Clean up stale dedupe keys occasionally
+    pruneNotificationLog().catch((err) => {
+      console.warn('Failed to prune notification log:', err);
+    });
+
     // Run immediately
     this.checkAndTriggerDoseReminders();
     this.checkAndLogImplicitSkips();
