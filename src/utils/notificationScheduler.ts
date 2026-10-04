@@ -306,6 +306,9 @@ export const notificationScheduler = {
         win.dose_per_intake,
         scheduledDateTime
       );
+      // Confirming the dose lowers the stock, which can cross the low-stock
+      // threshold: its 09:00 alarm has to be armed now, not at next cold start.
+      await this.refresh();
     } catch (err) {
       console.error('Failed to confirm dose from notification:', err);
     }

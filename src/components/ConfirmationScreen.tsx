@@ -4,7 +4,7 @@ import type { Drug, TimeWindow, DoseEvent } from '../types';
 import { useToast } from './ToastContext';
 import { ArrowLeft, Check, X, Calendar, AlertTriangle } from 'lucide-react';
 import { stockEngine, evaluateStockStatus } from '../utils/stockEngine';
-import { getLocalDateString } from '../utils/notificationScheduler';
+import { getLocalDateString, notificationScheduler } from '../utils/notificationScheduler';
 import { downloadICSFile } from '../utils/icsGenerator';
 import { getSettings } from '../utils/settings';
 
@@ -84,6 +84,8 @@ export const ConfirmationScreen: React.FC<ConfirmationScreenProps> = ({ drugId, 
       const windows = await timeWindowRepository.getByDrugId(drugId);
       const settings = getSettings();
       const status = evaluateStockStatus(updatedDrug, windows, settings.low_stock_threshold_days);
+      // The dose moved the stock, so the low-stock alarm must be re-armed.
+      await notificationScheduler.refresh();
 
       if (lowStockEntered && status.stockOutDate) {
         setLowStockAlertInfo({
