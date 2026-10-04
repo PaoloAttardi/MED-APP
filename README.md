@@ -1,73 +1,45 @@
-# React + TypeScript + Vite
+# MedTracker
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Promemoria di assunzione farmaci e controllo scorte. **App Android nativa, 100% offline**: nessun backend, nessun Web Push, nessun account. I dati stanno in IndexedDB sul dispositivo.
 
-Currently, two official plugins are available:
+## Stack
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+React 19 · TypeScript · Vite · Capacitor 8 · `@capacitor/local-notifications`
 
-## React Compiler
+## Comandi
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm install
+npm run dev            # sviluppo web (solo per iterare sulla UI)
+npm run check          # assert su finestre di assunzione e calendario
+npm run lint
+npm run build          # tsc -b + vite build -> dist/
+npm run android:sync   # build + copia dist/ nell'APK
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+## Build dell'APK
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+Serve JDK 21 e l'SDK Android. L'APK si produce così:
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm run android:sync
+./android/gradlew -p android assembleDebug
 ```
+
+L'output è `android/app/build/outputs/apk/debug/app-debug.apk`.
+
+> `android/local.properties` e `org.gradle.java.home` sono impostazioni di macchina e non vanno committate: il build si guida con `JAVA_HOME` e l'SDK Manager.
+
+Istruzioni di installazione, permessi e impostazioni OEM: **[DEPLOY_ANDROID.md](DEPLOY_ANDROID.md)**.
+
+## Documentazione
+
+- [CONTEXT.md](CONTEXT.md) — glossario del dominio e note architetturali.
+- [docs/adr/](docs/adr/) — decisioni di progetto, inclusa la migrazione da PWA a nativo.
+- [Technical_Requiremnts.md](Technical_Requiremnts.md) — specifiche del progetto di origine (PWA); la build consegnata è l'APK nativo descritto in ADR 0001.
+
+## Note operative
+
+- Gli allarmi sono nativi (`AlarmManager`, `setExact`) e sopravvivono a Doze e spegnimento schermo. Dopo un reboot `@capacitor/local-notifications` li ri-armi da solo.
+- Se il telefono era in aereo o spento, all'apertura dell'app viene fatto il catch-up delle finestre ancora aperte. Il log di deduplicazione viene scritto all'arming, quindi nessuna dose viene notificata due volte.
+- Alcuni OEM congelano l'app in deep sleep: dalle Impostazioni si può aprire la schermata di esenzione batteria.

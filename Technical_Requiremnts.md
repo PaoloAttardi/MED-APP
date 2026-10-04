@@ -4,6 +4,15 @@
 **Date:** 2026-06-13  
 **Status:** Ready for Implementation Agent  
 
+> **Nota di stato.** Questo documento descrive il progetto di origine come **PWA**
+> (Service Worker, deploy GitHub Pages, `localStorage`). La build consegnata è
+> invece un'**APK nativo Capacitor**: niente Service Worker, niente deploy web,
+> notifiche via `@capacitor/local-notifications` e dati in IndexedDB.
+> Le decisioni e le deviazioni sono in [ADR 0001](docs/adr/0001-pwa-to-native-capacitor.md),
+> la struttura corrente in [CONTEXT.md](CONTEXT.md), l'installazione in
+> [DEPLOY_ANDROID.md](DEPLOY_ANDROID.md). Dove questo documento contraddice
+> l'ADR, vale l'ADR.
+
 ---
 
 ## 1. Problem Definition
