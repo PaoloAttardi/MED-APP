@@ -1,0 +1,8 @@
+# gradlew fails with "unexpected character" if a Windows checkout rewrote it
+# to CRLF, which breaks every Linux/CI build of the Android project.
+*.sh text eol=lf
+gradlew text eol=lf
+
+# Keep generated web assets and Android sync output as LF-normalised text so
+# CRLF checkouts do not produce a noisy diff on every cap sync.
+android/app/src/main/assets/public/** text eol=lf

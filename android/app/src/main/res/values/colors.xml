@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Same tokens as src/index.css :root, so the native chrome matches the WebView. -->
+    <color name="colorPrimary">#0369A1</color>
+    <color name="colorPrimaryDark">#075985</color>
+    <color name="colorAccent">#0369A1</color>
+    <color name="appBackground">#F4F8FC</color>
+    <color name="brandSky">#5EB9FF</color>
+</resources>
