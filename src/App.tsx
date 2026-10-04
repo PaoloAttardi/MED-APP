@@ -1,68 +1,76 @@
 import React, { useState, useEffect } from 'react';
+import type { View, NavParams } from './types';
 import { ToastProvider, useToast } from './components/ToastContext';
 import { Dashboard } from './components/Dashboard';
 import { DrugForm } from './components/DrugForm';
 import { TimeWindowForm } from './components/TimeWindowForm';
 import { ConfirmationScreen } from './components/ConfirmationScreen';
 import { Settings } from './components/Settings';
-import { registerServiceWorker, getNotificationPermissionStatus, requestNotificationPermission } from './serviceWorkerRegistration';
+import { StockCalendar } from './components/StockCalendar';
+import { LocalNotifications } from '@capacitor/local-notifications';
 import { notificationScheduler } from './utils/notificationScheduler';
-import { 
-  Home, 
-  PlusCircle, 
-  Settings as SettingsIcon, 
+import {
+  Home,
+  PlusCircle,
+  CalendarDays,
+  Settings as SettingsIcon,
   Pill
 } from 'lucide-react';
 
-type View = 'dashboard' | 'add-drug' | 'edit-drug' | 'time-windows' | 'confirm-dose' | 'settings';
-
 const AppContent: React.FC = () => {
   const [currentView, setCurrentView] = useState<View>('dashboard');
-  const [viewParams, setViewParams] = useState<any>({});
-  const [permission, setPermission] = useState<NotificationPermission>('default');
-  const [tickCount, setTickCount] = useState(0); // Used to trigger refresh on scheduler ticks
+  const [viewParams, setViewParams] = useState<NavParams>({});
+  const [permission, setPermission] = useState<string>('default');
+  // tick only re-renders; reloadKey remounts data-reading views after a write.
+  const [, setTick] = useState(0);
+  const [reloadKey, setReloadKey] = useState(0);
   const { showToast } = useToast();
 
   useEffect(() => {
-    // 1. Register service worker
-    registerServiceWorker();
-
-    // 2. Load current permission status
-    setPermission(getNotificationPermissionStatus());
-
-    // 3. Start local notification scheduler
-    const cleanupScheduler = notificationScheduler.start(() => {
-      // Trigger a state change to force refresh the active view if needed (every minute)
-      setTickCount(prev => prev + 1);
+    // 1. Arm the native alarms, catch up missed windows, log implicit skips
+    notificationScheduler.start().catch(err => {
+      console.error('Notification scheduler failed to start:', err);
     });
 
-    // 4. Handle messages from Service Worker (e.g. background confirms)
-    const handleSWMessage = (event: MessageEvent) => {
-      if (event.data && event.data.type === 'DOSE_CONFIRMED') {
-        showToast('Dose confermata in background!', 'success');
-        // Force refresh by changing tick count
-        setTickCount(prev => prev + 1);
-      }
-    };
-    navigator.serviceWorker?.addEventListener('message', handleSWMessage);
+    // 2. Load current permission status
+    notificationScheduler.getPermissionStatus().then(setPermission).catch(() => {
+      setPermission('denied');
+    });
 
-    return () => {
-      cleanupScheduler();
-      navigator.serviceWorker?.removeEventListener('message', handleSWMessage);
-    };
+    // 3. "Ho preso la dose" on the notification itself. Tapping a notification
+    //    action launches the app, so this listener is always attached in time.
+    let listener: { remove: () => Promise<void> } | undefined;
+    LocalNotifications.addListener('localNotificationActionPerformed', event => {
+      if (event.actionId !== 'confirm') return;
+      notificationScheduler.confirmDose(event.notification.extra).then(() => {
+        showToast('Dose confermata!', 'success');
+        setReloadKey(prev => prev + 1);
+      });
+    }).then(handle => { listener = handle; });
+
+    return () => { listener?.remove(); };
   }, []);
 
-  const handleNavigate = (view: View, params: any = {}) => {
+  // Window status and countdowns are derived from `new Date()` at render time,
+  // so a dashboard left open across a boundary would keep showing stale state.
+  useEffect(() => {
+    const id = setInterval(() => setTick(prev => prev + 1), 60_000);
+    return () => clearInterval(id);
+  }, []);
+
+  const handleNavigate = (view: View, params: NavParams = {}) => {
     setCurrentView(view);
     setViewParams(params);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
   const handleRequestPermission = async () => {
-    const status = await requestNotificationPermission();
+    const status = await notificationScheduler.requestPermission();
     setPermission(status);
     if (status === 'granted') {
       showToast('Notifiche abilitate con successo!', 'success');
+      // Alarms were never armed while the permission was missing.
+      await notificationScheduler.refresh();
     }
   };
 
@@ -72,26 +80,15 @@ const AppContent: React.FC = () => {
       <header className="app-header app-container" style={{ paddingBottom: 0 }}>
         <h1 className="app-title" onClick={() => handleNavigate('dashboard')} style={{ cursor: 'pointer' }}>
           <Pill className="app-title-pill" size={28} />
-          Med<span style={{ fontWeight: 300, color: 'var(--text-secondary)' }}>Tracker</span>
+          <span>Med<span className="app-title-thin">Tracker</span></span>
         </h1>
-        
-        <div style={{ display: 'flex', gap: '0.5rem' }}>
-          <button 
-            onClick={() => handleNavigate('settings')} 
-            className={`btn btn-secondary btn-icon ${currentView === 'settings' ? 'btn-primary' : ''}`}
-            style={{ width: '40px', height: '40px' }}
-            title="Impostazioni"
-          >
-            <SettingsIcon size={18} />
-          </button>
-        </div>
       </header>
 
       {/* Main View Router */}
       <main style={{ flexGrow: 1, paddingBottom: '5rem' }}>
         {currentView === 'dashboard' && (
-          <Dashboard 
-            key={tickCount} // re-renders dashboard when scheduler ticks to update window countdowns
+          <Dashboard
+            key={reloadKey}
             onNavigate={handleNavigate}
             notificationPermission={permission}
             onRequestPermission={handleRequestPermission}
@@ -113,15 +110,17 @@ const AppContent: React.FC = () => {
           />
         )}
 
-        {currentView === 'time-windows' && (
-          <TimeWindowForm 
+        {/* Both forms need a drug; rendering them without one would show an empty
+            shell, so the guard also keeps the prop types honest. */}
+        {currentView === 'time-windows' && viewParams.drugId && (
+          <TimeWindowForm
             drugId={viewParams.drugId}
             onBack={() => handleNavigate('dashboard')}
           />
         )}
 
-        {currentView === 'confirm-dose' && (
-          <ConfirmationScreen 
+        {currentView === 'confirm-dose' && viewParams.drugId && viewParams.windowId && (
+          <ConfirmationScreen
             drugId={viewParams.drugId}
             windowId={viewParams.windowId}
             onBack={() => handleNavigate('dashboard')}
@@ -134,6 +133,10 @@ const AppContent: React.FC = () => {
             onPermissionChanged={(status) => setPermission(status)}
           />
         )}
+
+        {currentView === 'calendar' && (
+          <StockCalendar onNavigate={handleNavigate} />
+        )}
       </main>
 
       {/* Bottom Sticky Navigation */}
@@ -144,6 +147,14 @@ const AppContent: React.FC = () => {
         >
           <Home size={22} />
           <span>Dashboard</span>
+        </button>
+
+        <button 
+          onClick={() => handleNavigate('calendar')} 
+          className={`nav-item ${currentView === 'calendar' ? 'nav-item-active' : ''}`}
+        >
+          <CalendarDays size={22} />
+          <span>Calendario</span>
         </button>
 
         <button 

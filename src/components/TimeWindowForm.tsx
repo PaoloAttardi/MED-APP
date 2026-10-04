@@ -4,6 +4,7 @@ import { drugRepository, timeWindowRepository } from '../db/repositories';
 import { useToast } from './ToastContext';
 import { ArrowLeft, Plus, Trash2, Clock, AlertCircle } from 'lucide-react';
 import { stockEngine } from '../utils/stockEngine';
+import { notificationScheduler } from '../utils/notificationScheduler';
 
 interface TimeWindowFormProps {
   drugId: string;
@@ -108,6 +109,10 @@ export const TimeWindowForm: React.FC<TimeWindowFormProps> = ({ drugId, onBack }
       // Re-evaluate stock status to trigger low-stock if necessary
       await stockEngine.reevaluateAllDrugsStockStatus();
 
+      // A new or moved window has no alarm yet: without this re-arm the dose
+      // is silent until the next cold start.
+      await notificationScheduler.refresh();
+
       // Refresh list
       loadData();
     } catch (error) {
@@ -124,6 +129,7 @@ export const TimeWindowForm: React.FC<TimeWindowFormProps> = ({ drugId, onBack }
         
         // Re-evaluate stock status
         await stockEngine.reevaluateAllDrugsStockStatus();
+        await notificationScheduler.refresh();
 
         loadData();
       } catch (error) {
@@ -140,6 +146,8 @@ export const TimeWindowForm: React.FC<TimeWindowFormProps> = ({ drugId, onBack }
       
       // Re-evaluate stock status
       await stockEngine.reevaluateAllDrugsStockStatus();
+      // Enabling changes the daily dose, so the low-stock alarm moves too.
+      await notificationScheduler.refresh();
 
       loadData();
     } catch (error) {
@@ -186,7 +194,7 @@ export const TimeWindowForm: React.FC<TimeWindowFormProps> = ({ drugId, onBack }
                 className="glass-card" 
                 style={{ 
                   padding: '0.8rem 1rem', 
-                  background: 'rgba(255,255,255,0.01)', 
+                  background: 'var(--bg-subtle)', 
                   display: 'flex', 
                   justifyContent: 'space-between', 
                   alignItems: 'center' 
@@ -305,7 +313,7 @@ export const TimeWindowForm: React.FC<TimeWindowFormProps> = ({ drugId, onBack }
       {windows.length >= 6 && (
         <div className="banner" style={{ background: 'rgba(99, 102, 241, 0.1)', borderColor: 'rgba(99,102,241,0.2)' }}>
           <AlertCircle size={18} className="text-accent" style={{ flexShrink: 0 }} />
-          <span style={{ fontSize: '0.85rem', color: '#c7d2fe' }}>
+          <span style={{ fontSize: '0.85rem', color: 'var(--primary)' }}>
             Hai raggiunto il numero massimo consigliato di fasce orarie per questo farmaco (6).
           </span>
         </div>

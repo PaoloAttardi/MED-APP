@@ -22,6 +22,24 @@ export async function markNotificationFired(key: string): Promise<void> {
   await promisifyRequest(store.put({ key, fired_at: new Date().toISOString() }));
 }
 
+// Newest fired_at across every key starting with `prefix`, or null if the
+// prefix has never fired. Anchors "every N days" rules to the last actual
+// notification instead of to a value that drifts (e.g. days of autonomy).
+export async function getLastFiredAt(prefix: string): Promise<Date | null> {
+  const db = await openDatabase();
+  const tx = db.transaction('notification_log', 'readonly');
+  const store = tx.objectStore('notification_log');
+  const records = await promisifyRequest<NotificationLogRecord[]>(store.getAll());
+
+  let latest: number | null = null;
+  for (const record of records) {
+    if (!record.key.startsWith(prefix)) continue;
+    const at = record.fired_at ? new Date(record.fired_at).getTime() : 0;
+    if (latest === null || at > latest) latest = at;
+  }
+  return latest === null ? null : new Date(latest);
+}
+
 export async function pruneNotificationLog(maxAgeDays = 10): Promise<void> {
   const db = await openDatabase();
   const cutoff = Date.now() - maxAgeDays * DAY_MS;

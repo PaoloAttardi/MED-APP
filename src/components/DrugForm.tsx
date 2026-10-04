@@ -4,6 +4,7 @@ import type { Drug } from '../types';
 import { useToast } from './ToastContext';
 import { ArrowLeft, Save, AlertTriangle } from 'lucide-react';
 import { stockEngine } from '../utils/stockEngine';
+import { notificationScheduler } from '../utils/notificationScheduler';
 
 interface DrugFormProps {
   drugId?: string; // If present, we are in Edit mode
@@ -113,6 +114,8 @@ export const DrugForm: React.FC<DrugFormProps> = ({ drugId, onBack, onSaved }) =
         }
 
         showToast('Farmaco aggiornato con successo', 'success');
+        // Stock changes move the low-stock alarm, so re-arm before leaving.
+        await notificationScheduler.refresh();
         onSaved(updatedDrug.id, false);
       }
     } catch (error) {
@@ -229,7 +232,7 @@ export const DrugForm: React.FC<DrugFormProps> = ({ drugId, onBack, onSaved }) =
                 </label>
                 <div className="banner" style={{ background: 'rgba(239, 68, 68, 0.08)', borderColor: 'rgba(239, 68, 68, 0.2)', marginBottom: '0.75rem', padding: '0.75rem' }}>
                   <AlertTriangle size={16} className="text-danger" style={{ flexShrink: 0 }} />
-                  <span style={{ fontSize: '0.8rem', color: '#fca5a5' }}>
+                  <span style={{ fontSize: '0.8rem', color: 'var(--danger)' }}>
                     <strong>Attenzione:</strong> Stai sovrascrivendo la scorta attuale. Inserisci il conteggio esatto delle pillole fisiche rimaste.
                   </span>
                 </div>

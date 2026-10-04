@@ -1,20 +1,21 @@
 import React, { useState, useEffect } from 'react';
 import { getSettings, saveSettings } from '../utils/settings';
+import type { Settings as AppSettings } from '../types';
 import { stockEngine } from '../utils/stockEngine';
 import { useToast } from './ToastContext';
-import { Save, Bell, BellOff, Info, RefreshCw } from 'lucide-react';
-import { requestNotificationPermission, getNotificationPermissionStatus } from '../serviceWorkerRegistration';
+import { Save, Bell, BellOff, Info, RefreshCw, BatteryCharging, AlarmClock } from 'lucide-react';
 import { notificationScheduler } from '../utils/notificationScheduler';
 
 interface SettingsProps {
   onBack: () => void;
-  onPermissionChanged: (status: NotificationPermission) => void;
+  onPermissionChanged: (status: string) => void;
 }
 
 export const Settings: React.FC<SettingsProps> = ({ onBack, onPermissionChanged }) => {
   const [threshold, setThreshold] = useState<number>(4);
-  const [frequency, setFrequency] = useState<'DAILY' | 'EVERY_TWO_DAYS' | 'DAY_BEFORE_ONLY'>('DAILY');
-  const [permission, setPermission] = useState<NotificationPermission>('default');
+  const [frequency, setFrequency] = useState<AppSettings['low_stock_notification_frequency']>('DAILY');
+  const [permission, setPermission] = useState<string>('default');
+  const [exactAlarms, setExactAlarms] = useState<string>('granted');
 
   const [errors, setErrors] = useState<Record<string, string>>({});
   const { showToast } = useToast();
@@ -23,15 +24,17 @@ export const Settings: React.FC<SettingsProps> = ({ onBack, onPermissionChanged 
     const s = getSettings();
     setThreshold(s.low_stock_threshold_days);
     setFrequency(s.low_stock_notification_frequency);
-    setPermission(getNotificationPermissionStatus());
+    notificationScheduler.getPermissionStatus().then(setPermission).catch(() => {});
+    notificationScheduler.checkExactAlarmSetting().then(setExactAlarms).catch(() => {});
   }, []);
 
   const handleRequestPermission = async () => {
-    const status = await requestNotificationPermission();
+    const status = await notificationScheduler.requestPermission();
     setPermission(status);
     onPermissionChanged(status);
-    
+
     if (status === 'granted') {
+      await notificationScheduler.refresh();
       showToast('Notifiche abilitate con successo!', 'success');
     } else {
       showToast('Permesso notifiche negato o chiuso.', 'warning');
@@ -62,6 +65,9 @@ export const Settings: React.FC<SettingsProps> = ({ onBack, onPermissionChanged 
       // Re-evaluate all drugs immediately with new settings
       await stockEngine.reevaluateAllDrugsStockStatus();
 
+      // Threshold and frequency feed the low-stock alarms, so re-arm them.
+      await notificationScheduler.scheduleAll();
+
       showToast('Impostazioni salvate con successo', 'success');
       onBack();
     } catch (error) {
@@ -90,7 +96,7 @@ export const Settings: React.FC<SettingsProps> = ({ onBack, onPermissionChanged 
         <div className="settings-section">
           <h3 className="settings-section-title">Permessi Notifiche</h3>
           
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '1rem', background: 'rgba(255,255,255,0.02)', padding: '1rem', borderRadius: '12px', border: '1px solid var(--border-color)' }}>
+          <div className="settings-row">
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
               {permission === 'granted' ? (
                 <Bell size={24} className="text-primary" />
@@ -109,7 +115,7 @@ export const Settings: React.FC<SettingsProps> = ({ onBack, onPermissionChanged 
                 <p className="text-muted" style={{ fontSize: '0.8rem', marginTop: '0.1rem' }}>
                   {permission === 'granted'
                     ? 'Riceverai i reminder e gli avvisi scorte'
-                    : 'Modifica i permessi del browser per attivare'}
+                    : 'Modifica i permessi delle notifiche per attivarle'}
                 </p>
               </div>
             </div>
@@ -125,6 +131,63 @@ export const Settings: React.FC<SettingsProps> = ({ onBack, onPermissionChanged 
               </button>
             )}
           </div>
+
+          {/*
+            Only shown when Android reports the permission revoked. USE_EXACT_ALARM
+            is granted at install, so on a normal build this row never appears; it
+            exists because the user can switch it off in system settings, and
+            Android then deletes every scheduled alarm.
+          */}
+          {permission === 'granted' && exactAlarms !== 'granted' && (
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '1rem', background: 'rgba(245,158,11,0.04)', padding: '1rem', borderRadius: '12px', border: '1px solid rgba(245,158,11,0.25)', marginTop: '0.75rem' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                <AlarmClock size={24} style={{ color: 'var(--warning)', flexShrink: 0 }} />
+                <div>
+                  <strong style={{ fontSize: '0.95rem' }}>Allarmi esatti disattivati</strong>
+                  <p className="text-muted" style={{ fontSize: '0.8rem', marginTop: '0.1rem' }}>
+                    Senza questo permesso Android puo' ritardare i promemoria di qualche minuto
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => notificationScheduler.openExactAlarmSettings()}
+                className="btn btn-primary btn-small"
+                style={{ alignSelf: 'center', flexShrink: 0, lineHeight: 1, whiteSpace: 'nowrap' }}
+              >
+                Attiva
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* Battery optimisation — OEM managers can freeze the app regardless of
+            AlarmManager being exempt, so this is always offered. */}
+        <div className="settings-section">
+          <h3 className="settings-section-title">Affidabilita' Notifiche</h3>
+          <div className="settings-row">
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+              <BatteryCharging size={24} style={{ color: 'var(--primary)', flexShrink: 0 }} />
+              <div>
+                <strong style={{ fontSize: '0.95rem' }}>Ottimizzazione batteria</strong>
+                <p className="text-muted" style={{ fontSize: '0.8rem', marginTop: '0.1rem' }}>
+                  Alcuni produttori mettono l'app in sospeso profondo e le notifiche smettono di arrivare
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => notificationScheduler.openBatteryOptimizationSettings()}
+              className="btn btn-secondary btn-small"
+              style={{ alignSelf: 'center', flexShrink: 0, lineHeight: 1, whiteSpace: 'nowrap' }}
+            >
+              Apri
+            </button>
+          </div>
+          <p className="text-muted" style={{ fontSize: '0.75rem', marginTop: '0.6rem' }}>
+            Nella schermata app aperta, imposta <strong>Batteria</strong> su <strong>Non limitato</strong>.
+            Su Xiaomi e Huawei serve anche attivare l'avvio automatico dall'app manager del produttore.
+          </p>
         </div>
 
         {/* Low Stock Alerts Setup */}
@@ -136,7 +199,7 @@ export const Settings: React.FC<SettingsProps> = ({ onBack, onPermissionChanged 
             <label className="form-label">Soglia Scorta Bassa (giorni di autonomia)</label>
             <div className="banner" style={{ background: 'rgba(99, 102, 241, 0.04)', borderColor: 'rgba(99, 102, 241, 0.1)', marginBottom: '0.75rem', padding: '0.75rem' }}>
               <Info size={16} className="text-accent" style={{ flexShrink: 0 }} />
-              <span style={{ fontSize: '0.8rem', color: '#c7d2fe' }}>
+              <span style={{ fontSize: '0.8rem', color: 'var(--primary)' }}>
                 Verrai avvisato quando l'autonomia stimata scende a o sotto questo valore.
               </span>
             </div>
@@ -161,7 +224,7 @@ export const Settings: React.FC<SettingsProps> = ({ onBack, onPermissionChanged 
             <select
               className="form-control form-select"
               value={frequency}
-              onChange={(e) => setFrequency(e.target.value as any)}
+              onChange={(e) => setFrequency(e.target.value as AppSettings['low_stock_notification_frequency'])}
             >
               <option value="DAILY">Ogni Giorno (Giornaliera)</option>
               <option value="EVERY_TWO_DAYS">Ogni 2 Giorni</option>

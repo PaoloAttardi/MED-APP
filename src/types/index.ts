@@ -37,3 +37,15 @@ export interface Settings {
   low_stock_threshold_days: number;
   low_stock_notification_frequency: 'DAILY' | 'EVERY_TWO_DAYS' | 'DAY_BEFORE_ONLY';
 }
+
+export type View =
+  | 'dashboard' | 'add-drug' | 'edit-drug' | 'time-windows'
+  | 'confirm-dose' | 'settings' | 'calendar';
+
+export interface NavParams {
+  drugId?: string;
+  windowId?: string;
+  label?: string;
+  plannedDose?: number;
+  unitLabel?: string;
+}

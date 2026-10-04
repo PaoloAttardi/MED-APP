@@ -1,120 +1,227 @@
-import type { TimeWindow } from '../types';
+import { registerPlugin } from '@capacitor/core';
+import { LocalNotifications } from '@capacitor/local-notifications';
+import type { LocalNotificationSchema } from '@capacitor/local-notifications';
+import type { Drug, TimeWindow } from '../types';
 import { drugRepository, timeWindowRepository, doseEventRepository } from '../db/repositories';
 import { getSettings } from './settings';
-import { evaluateStockStatus } from './stockEngine';
-import { isNotificationFired, markNotificationFired, pruneNotificationLog } from './notificationLog';
+import { evaluateStockStatus, stockEngine } from './stockEngine';
+import { isNotificationFired, markNotificationFired, getLastFiredAt, pruneNotificationLog } from './notificationLog';
+import {
+  getLocalDateString,
+  getWindowActiveRange,
+  getUpcomingOccurrences,
+  shouldNotifyLowStock
+} from './doseWindows';
 
-// Get YYYY-MM-DD in local time
-export function getLocalDateString(date: Date = new Date()): string {
-  const yyyy = date.getFullYear();
-  const mm = String(date.getMonth() + 1).padStart(2, '0');
-  const dd = String(date.getDate()).padStart(2, '0');
-  return `${yyyy}-${mm}-${dd}`;
+// Re-exported so components keep importing the date helpers from here.
+export {
+  ARM_DAYS,
+  getLocalDateString,
+  getHoursMinutesString,
+  getWindowActiveRange,
+  getUpcomingOccurrences,
+  shouldNotifyLowStock
+} from './doseWindows';
+
+const CHANNEL_ID = 'dose-reminders';
+const ACTION_TYPE_ID = 'dose-reminder';
+const LOW_STOCK_HOUR = 9;
+const LOW_STOCK_MINUTE = 0;
+// Kept far above scheduleAll()'s counter so catch-up ids never collide with it.
+const CATCHUP_ID_BASE = 1_000_000;
+
+// The plugin's LocalNotificationRestoreReceiver already re-arms every saved
+// alarm on BOOT_COMPLETED, and re-fires ones whose time passed while the device
+// was off. The rolling window below is therefore not a reboot workaround: it is
+// what picks up windows created or edited after the last arming.
+// ponytail: 7 days x ~15 windows is ~100 alarms, well under Android's 500 cap.
+
+// No npm package wraps this Intent, and Android blocks web navigation to
+// intent:// from a WebView, so it is a ~25-line local plugin in android/app.
+const BatterySettings = registerPlugin<{ open(): Promise<void> }>('BatterySettings');
+
+function buildDoseNotification(
+  drug: Drug,
+  win: TimeWindow,
+  dateStr: string,
+  id: number,
+  at?: Date
+): LocalNotificationSchema {
+  return {
+    id,
+    title: `Ora del farmaco: ${drug.name}`,
+    body: `${win.label} — ${win.dose_per_intake} ${drug.unit_label}`,
+    schedule: at ? { at, allowWhileIdle: true } : undefined,
+    channelId: CHANNEL_ID,
+    smallIcon: 'ic_stat_medtracker',
+    iconColor: '#0369a1',
+    actionTypeId: ACTION_TYPE_ID,
+    // Do not prompt for the exact-alarm settings screen mid-use; fall back to
+    // an inexact alarm instead and surface ScheduleResult.warning to the user.
+    isExactNotification: true,
+    isExactMandatory: false,
+    extra: {
+      kind: 'dose',
+      drugId: drug.id,
+      windowId: win.id,
+      scheduledDateTime: `${dateStr}T${win.notification_time}:00`,
+    },
+  };
 }
 
-export function getHoursMinutesString(date: Date = new Date()): string {
-  const hh = String(date.getHours()).padStart(2, '0');
-  const mm = String(date.getMinutes()).padStart(2, '0');
-  return `${hh}:${mm}`;
-}
+function buildLowStockNotification(
+  drug: Drug,
+  autonomy: number,
+  id: number,
+  at: Date
+): LocalNotificationSchema {
+  const body = autonomy === 0
+    ? 'La scorta di questo farmaco è esaurita!'
+    : autonomy === 1
+      ? 'La scorta terminerà domani! Ricordati di fare rifornimento.'
+      : `Scorta in esaurimento. Autonomia stimata: ${autonomy} giorni.`;
 
-// Resolve an asset path relative to the Service Worker scope, so it works
-// regardless of the configured base path (e.g. "/MED-APP/")
-function scopeAssetUrl(reg: ServiceWorkerRegistration, path: string): string {
-  return new URL(path, reg.scope).href;
-}
-
-// Function to calculate the end time of a window
-export function getWindowActiveRange(
-  window: TimeWindow,
-  sortedWindows: TimeWindow[],
-  dateStr: string
-): { start: Date; end: Date } {
-  const start = new Date(`${dateStr}T${window.notification_time}:00`);
-  
-  const currentIndex = sortedWindows.findIndex(w => w.id === window.id);
-  let end: Date;
-
-  if (currentIndex < sortedWindows.length - 1) {
-    // End is the start of the next window on the same day
-    const nextWindow = sortedWindows[currentIndex + 1];
-    end = new Date(`${dateStr}T${nextWindow.notification_time}:00`);
-  } else {
-    // Last window of the day ends at 23:59:59
-    end = new Date(`${dateStr}T23:59:59`);
-  }
-
-  return { start, end };
+  return {
+    id,
+    title: `⚠️ ${drug.name}: scorta quasi esaurita`,
+    body,
+    schedule: { at, allowWhileIdle: true },
+    channelId: CHANNEL_ID,
+    smallIcon: 'ic_stat_medtracker',
+    iconColor: '#0369a1',
+    actionTypeId: ACTION_TYPE_ID,
+    isExactNotification: true,
+    isExactMandatory: false,
+    extra: { kind: 'low-stock', drugId: drug.id },
+  };
 }
 
 export const notificationScheduler = {
-  // 1. Check and trigger dose reminder notifications for the current minute
-  async checkAndTriggerDoseReminders(): Promise<void> {
-    if (!('Notification' in window) || Notification.permission !== 'granted') {
-      return;
-    }
-
-    const reg = await navigator.serviceWorker.ready;
-    if (!reg) return;
-
-    const iconUrl = scopeAssetUrl(reg, 'icon-192.png');
-    const drugs = await drugRepository.getAll();
-    const todayStr = getLocalDateString();
-    const now = new Date();
-
-    for (const drug of drugs) {
-      const sortedWindows = await timeWindowRepository.getByDrugId(drug.id);
-      if (sortedWindows.length === 0) continue;
-
-      for (const win of sortedWindows) {
-        if (!win.notification_enabled) continue;
-
-        // Fire while the intake window is still open: this also covers catch-up
-        // when the app is (re)opened after the exact HH:MM has already passed.
-        const { start, end } = getWindowActiveRange(win, sortedWindows, todayStr);
-        if (now < start || now >= end) continue;
-
-        // Once-per-window-per-day dedupe, shared with the Service Worker
-        const firedKey = `dose:${win.id}:${todayStr}`;
-        if (await isNotificationFired(firedKey)) continue;
-
-        // Check if dose event (any type) already exists for this window today
-        const alreadyLogged = await doseEventRepository.existsConfirmedForWindow(drug.id, win.id, todayStr);
-        if (alreadyLogged) continue;
-
-        // Show the notification using the SW registration so click actions are caught by sw.js
-        const tag = `dose-reminder-${drug.id}-${win.id}-${todayStr}`;
-
-        try {
-          await reg.showNotification(`Ora del farmaco: ${drug.name}`, {
-            body: `${win.label} — ${win.dose_per_intake} ${drug.unit_label}`,
-            icon: iconUrl,
-            badge: iconUrl,
-            tag,
-            data: {
-              drugId: drug.id,
-              windowId: win.id,
-              scheduledDateTime: `${todayStr}T${win.notification_time}:00`
-            },
-            actions: [
-              { action: 'confirm', title: 'Ho preso la dose' },
-              { action: 'open', title: 'Apri app' }
-            ],
-            requireInteraction: true
-          } as any);
-          await markNotificationFired(firedKey);
-        } catch (err) {
-          console.error('Failed to show reminder notification:', err);
-        }
-      }
-    }
+  // A notification on a channelId that was never created silently never fires,
+  // so this must run before the first schedule() of the session.
+  async init(): Promise<void> {
+    await LocalNotifications.createChannel({
+      id: CHANNEL_ID,
+      name: 'Promemoria farmaci',
+      description: 'Avvisi di assunzione e scorte in esaurimento',
+      importance: 4,
+      visibility: 1,
+      vibration: true,
+    });
   },
 
-  // 2. Scan past windows (for today and previous days) and log implicit skips
+  // Wipe and re-arm the whole rolling window. Ids are a per-call counter: the
+  // rebuild cancels by whatever getPending() reports, so they need not be stable.
+  async scheduleAll(): Promise<void> {
+    const perm = await LocalNotifications.checkPermissions();
+    if (perm.display !== 'granted') return;
+
+    const { notifications: pending } = await LocalNotifications.getPending();
+    if (pending.length > 0) {
+      await LocalNotifications.cancel({ notifications: pending.map(n => ({ id: n.id })) });
+    }
+
+    const now = new Date();
+    const settings = getSettings();
+    const drugs = await drugRepository.getAll();
+    const batch: LocalNotificationSchema[] = [];
+    // Keys written as the alarm is armed. A native alarm that fires leaves no
+    // trace in JS, so without this the catch-up path cannot tell "already
+    // delivered by AlarmManager" from "never scheduled" and double-notifies.
+    const armedDoseKeys: string[] = [];
+    const armedLowKeys: string[] = [];
+    let id = 1;
+
+    for (const drug of drugs) {
+      const windows = await timeWindowRepository.getByDrugId(drug.id);
+      if (windows.length === 0) continue;
+
+      for (const win of windows) {
+        if (!win.notification_enabled) continue;
+        for (const at of getUpcomingOccurrences(win, now)) {
+          const dateStr = getLocalDateString(at);
+          batch.push(buildDoseNotification(drug, win, dateStr, id++, at));
+          armedDoseKeys.push(`dose:${win.id}:${dateStr}`);
+        }
+      }
+
+      if (!drug.low_stock_alert_active) continue;
+      const status = evaluateStockStatus(drug, windows, settings.low_stock_threshold_days);
+      if (!status.isLowStock || status.autonomy === Infinity) continue;
+
+      const last = await getLastFiredAt(`low:${drug.id}:`);
+      if (!shouldNotifyLowStock(settings, status.autonomy, last, now)) continue;
+
+      const at = new Date(now.getFullYear(), now.getMonth(), now.getDate(), LOW_STOCK_HOUR, LOW_STOCK_MINUTE);
+      if (at.getTime() <= now.getTime()) at.setDate(at.getDate() + 1);
+      batch.push(buildLowStockNotification(drug, status.autonomy, id++, at));
+      armedLowKeys.push(`low:${drug.id}:${getLocalDateString(at)}`);
+    }
+
+    if (batch.length === 0) return;
+
+    const result = await LocalNotifications.schedule({ notifications: batch });
+    if (result.warning) {
+      console.warn('Alcuni promemoria non sono esatti:', result.warning.message);
+    }
+
+    // Only after schedule() succeeded: a failed batch must stay catch-up-able.
+    for (const key of armedDoseKeys) await markNotificationFired(key);
+    for (const key of armedLowKeys) await markNotificationFired(key);
+  },
+
+  // Windows whose start has passed but whose end has not: the phone was in
+  // airplane mode, or the window was created after the last arming. Notify
+  // immediately. The log is written at arm time by scheduleAll(), so an alarm
+  // AlarmManager already delivered is skipped here instead of double-notifying.
+  async catchUpOpenWindows(): Promise<void> {
+    const perm = await LocalNotifications.checkPermissions();
+    if (perm.display !== 'granted') return;
+
+    const now = new Date();
+    const todayStr = getLocalDateString(now);
+    const drugs = await drugRepository.getAll();
+    const immediate: LocalNotificationSchema[] = [];
+    // Disjoint from scheduleAll()'s 1..N range: reusing low ids would replace
+    // still-pending dose alarms, silently dropping those reminders.
+    let id = CATCHUP_ID_BASE;
+
+    for (const drug of drugs) {
+      const windows = await timeWindowRepository.getByDrugId(drug.id);
+      if (windows.length === 0) continue;
+
+      for (const win of windows) {
+        if (!win.notification_enabled) continue;
+
+        const { start, end } = getWindowActiveRange(win, windows, todayStr);
+        if (now < start || now >= end) continue;
+        if (await isNotificationFired(`dose:${win.id}:${todayStr}`)) continue;
+        if (await doseEventRepository.existsConfirmedForWindow(drug.id, win.id, todayStr)) continue;
+
+        immediate.push(buildDoseNotification(drug, win, todayStr, id++));
+        await markNotificationFired(`dose:${win.id}:${todayStr}`);
+      }
+    }
+
+    if (immediate.length === 0) return;
+    await LocalNotifications.schedule({ notifications: immediate });
+  },
+
+  // Single entry point for "the data changed, re-arm". scheduleAll() must run
+  // before the catch-up so the log already covers the armed alarms.
+  async refresh(): Promise<void> {
+    await this.scheduleAll();
+    await this.catchUpOpenWindows();
+  },
+
+  // Scan past windows (for today and previous days) and log implicit skips.
+  // Only windows that contribute to the daily dose are considered: a window with
+  // notifications off is excluded by calculateDailyDose too, so logging a skip
+  // for one would invent a dose event for a dose the stock maths never counted.
   async checkAndLogImplicitSkips(): Promise<void> {
     const drugs = await drugRepository.getAll();
     const now = new Date();
-    
+
     // We look back up to 5 days to handle case where device was powered off / offline
     for (let dayOffset = 0; dayOffset <= 5; dayOffset++) {
       const targetDate = new Date();
@@ -126,6 +233,8 @@ export const notificationScheduler = {
         if (sortedWindows.length === 0) continue;
 
         for (const win of sortedWindows) {
+          if (!win.notification_enabled) continue;
+
           const { end } = getWindowActiveRange(win, sortedWindows, targetDateStr);
 
           // If the window's active period is already in the past
@@ -146,7 +255,7 @@ export const notificationScheduler = {
                 confirmed_at: end.toISOString(), // Expired time
                 stock_after: drug.current_stock
               });
-              
+
               console.log(`Logged implicit skip for ${drug.name} - ${win.label} on ${targetDateStr}`);
             }
           }
@@ -155,95 +264,80 @@ export const notificationScheduler = {
     }
   },
 
-  // 3. Check and trigger low stock recurring notifications
-  async checkAndTriggerLowStockReminders(): Promise<void> {
-    if (!('Notification' in window) || Notification.permission !== 'granted') {
-      return;
-    }
-
-    const reg = await navigator.serviceWorker.ready;
-    if (!reg) return;
-
-    const iconUrl = scopeAssetUrl(reg, 'icon-192.png');
-
-    // Check low stock once a day, e.g., at 09:00 (if app is running)
-    const currentHHMM = getHoursMinutesString();
-    if (currentHHMM !== '09:00') {
-      // For manual trigger during test, we'll run it, but in production it fires at 09:00
-      // To allow testing, we also let it run if specifically called, but check local storage to limit once-per-day
-    }
-
-    const todayStr = getLocalDateString();
-    const settings = getSettings();
-    const drugs = await drugRepository.getAll();
-
-    for (const drug of drugs) {
-      if (!drug.low_stock_alert_active) continue;
-
-      const windows = await timeWindowRepository.getByDrugId(drug.id);
-      const status = evaluateStockStatus(drug, windows, settings.low_stock_threshold_days);
-      if (!status.isLowStock || status.autonomy === Infinity || !status.stockOutDate) continue;
-
-      const firedKey = `low:${drug.id}:${todayStr}`;
-      const alreadyFiredToday = await isNotificationFired(firedKey);
-      if (alreadyFiredToday) continue;
-
-      // Evaluate frequency condition
-      let shouldNotify = false;
-
-      if (settings.low_stock_notification_frequency === 'DAILY') {
-        shouldNotify = true;
-      } else if (settings.low_stock_notification_frequency === 'EVERY_TWO_DAYS') {
-        // Find when the alert became active, or notify every even offset days from stock-out date
-        const daysToStockOut = status.autonomy;
-        // Notify if daysToStockOut is even (or odd, as long as it alternates)
-        shouldNotify = daysToStockOut % 2 === 0;
-      } else if (settings.low_stock_notification_frequency === 'DAY_BEFORE_ONLY') {
-        // Only trigger if autonomy is exactly 1 day (stock out tomorrow)
-        // Or if autonomy is 0 (stock out today, as fallback)
-        shouldNotify = status.autonomy === 1 || status.autonomy === 0;
-      }
-
-      if (shouldNotify) {
-        let bodyText = `Scorta in esaurimento. Autonomia stimata: ${status.autonomy} giorni.`;
-        if (status.autonomy === 0) {
-          bodyText = `La scorta di questo farmaco è esaurita!`;
-        } else if (status.autonomy === 1) {
-          bodyText = `La scorta terminerà domani! Ricordati di fare rifornimento.`;
-        }
-
-        reg.showNotification(`⚠️ ${drug.name}: scorta quasi esaurita`, {
-          body: bodyText,
-          icon: iconUrl,
-          badge: iconUrl,
-          tag: `low-stock-${drug.id}-${todayStr}`,
-          data: { drugId: drug.id }
-        });
-
-        await markNotificationFired(firedKey);
-      }
-    }
-  },
-
-  // Start the background interval (runs every 60s)
-  start(onTick?: () => void) {
-    // Clean up stale dedupe keys occasionally
-    pruneNotificationLog().catch((err) => {
+  // Runs once per app launch: arm the alarms, catch up anything missed, and log
+  // the implicit skips that only a live process can write.
+  async start(): Promise<void> {
+    await pruneNotificationLog().catch(err => {
       console.warn('Failed to prune notification log:', err);
     });
 
-    // Run immediately
-    this.checkAndTriggerDoseReminders();
-    this.checkAndLogImplicitSkips();
-    this.checkAndTriggerLowStockReminders();
+    await this.checkAndLogImplicitSkips();
+    await this.init();
 
-    const intervalId = setInterval(() => {
-      this.checkAndTriggerDoseReminders();
-      this.checkAndLogImplicitSkips();
-      this.checkAndTriggerLowStockReminders();
-      if (onTick) onTick();
-    }, 60000); // every minute
+    await LocalNotifications.registerActionTypes({
+      types: [{
+        id: ACTION_TYPE_ID,
+        actions: [{ id: 'confirm', title: 'Ho preso la dose' }],
+      }],
+    }).catch(err => {
+      console.warn('Failed to register notification actions:', err);
+    });
 
-    return () => clearInterval(intervalId);
-  }
+    await this.refresh();
+  },
+
+  // The "Ho preso la dose" button. Runs in the app process, so it reads the real
+  // low-stock threshold from settings — the Service Worker version had to fall
+  // back to a hardcoded 4 because it could not read localStorage.
+  async confirmDose(extra: unknown): Promise<void> {
+    if (!extra || typeof extra !== 'object') return;
+    const { kind, drugId, windowId, scheduledDateTime } = extra as {
+      kind?: string; drugId?: string; windowId?: string; scheduledDateTime?: string;
+    };
+    if (kind !== 'dose' || !drugId || !windowId || !scheduledDateTime) return;
+
+    try {
+      const win = await timeWindowRepository.getById(windowId);
+      if (!win) return;
+
+      await stockEngine.processDoseConfirmation(
+        drugId,
+        windowId,
+        win.dose_per_intake,
+        scheduledDateTime
+      );
+    } catch (err) {
+      console.error('Failed to confirm dose from notification:', err);
+    }
+  },
+
+  async getPermissionStatus(): Promise<string> {
+    const status = await LocalNotifications.checkPermissions();
+    return status.display;
+  },
+
+  async requestPermission(): Promise<string> {
+    const status = await LocalNotifications.requestPermissions();
+    return status.display;
+  },
+
+  async openExactAlarmSettings(): Promise<void> {
+    await LocalNotifications.changeExactNotificationSetting();
+  },
+
+  // Android deletes every exact alarm if the user revokes the permission, so
+  // this is re-read on launch and re-arms when it comes back granted.
+  async checkExactAlarmSetting(): Promise<string> {
+    const status = await LocalNotifications.checkExactNotificationSetting();
+    return status.exact_alarm;
+  },
+
+  // Android's per-OEM battery managers ("deep sleep", "Auto-start", "Battery
+  // optimisation") can freeze the app even though AlarmManager itself is exempt.
+  // ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS lands on the list of apps to
+  // exempt and needs no manifest permission, unlike the Play-restricted
+  // ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS.
+  async openBatteryOptimizationSettings(): Promise<void> {
+    await BatterySettings.open();
+  },
 };

@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from 'react';
-import type { Drug, TimeWindow, DoseEvent } from '../types';
+import type { Drug, TimeWindow, DoseEvent, View, NavParams } from '../types';
 import { drugRepository, timeWindowRepository, doseEventRepository } from '../db/repositories';
 import { evaluateStockStatus } from '../utils/stockEngine';
 import { getSettings } from '../utils/settings';
 import { getLocalDateString, getWindowActiveRange } from '../utils/notificationScheduler';
+import { notificationScheduler } from '../utils/notificationScheduler';
 import { downloadICSFile } from '../utils/icsGenerator';
 import { useToast } from './ToastContext';
 import { 
@@ -18,8 +19,8 @@ import {
 } from 'lucide-react';
 
 interface DashboardProps {
-  onNavigate: (view: 'dashboard' | 'add-drug' | 'edit-drug' | 'confirm-dose' | 'settings', params?: any) => void;
-  notificationPermission: NotificationPermission;
+  onNavigate: (view: View, params?: NavParams) => void;
+  notificationPermission: string;
   onRequestPermission: () => void;
 }
 
@@ -76,17 +77,6 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
   useEffect(() => {
     loadData();
-    
-    // Add event listener to refresh on sw messages
-    const handleSWMessage = (event: MessageEvent) => {
-      if (event.data && event.data.type === 'DOSE_CONFIRMED') {
-        loadData();
-      }
-    };
-    navigator.serviceWorker.addEventListener('message', handleSWMessage);
-    return () => {
-      navigator.serviceWorker.removeEventListener('message', handleSWMessage);
-    };
   }, []);
 
   const handleQuickRefill = async (drugId: string, name: string) => {
@@ -114,6 +104,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
       await drugRepository.update(drugId, patch);
       showToast(`Scorta aggiornata per ${name} (+${delta})`, 'success');
       setRefillDeltas(prev => ({ ...prev, [drugId]: 0 }));
+      // A refill can clear the low-stock alert and cancel its pending alarm.
+      await notificationScheduler.refresh();
       loadData();
     } catch (error) {
       console.error(error);
@@ -187,7 +179,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
             <button 
               onClick={onRequestPermission} 
               className="btn btn-secondary btn-small"
-              style={{ marginTop: '0.5rem', background: 'rgba(255,255,255,0.1)' }}
+              style={{ marginTop: '0.5rem' }}
             >
               Richiedi Permesso
             </button>
@@ -268,13 +260,13 @@ export const Dashboard: React.FC<DashboardProps> = ({
                 {/* ICS Download for Low Stock */}
                 {status.isLowStock && status.dailyDose > 0 && status.stockOutDate && (
                   <div style={{ marginBottom: '1.25rem', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-                    <p style={{ fontSize: '0.85rem', color: '#fca5a5', display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
+                    <p style={{ fontSize: '0.85rem', color: 'var(--warning)', display: 'flex', alignItems: 'center', gap: '0.25rem', fontWeight: 500 }}>
                       <AlertTriangle size={14} /> Esaurimento previsto: {status.stockOutDate.toLocaleDateString('it-IT')}
                     </p>
                     <button 
                       onClick={() => handleDownloadICS(drug, status.stockOutDate)}
                       className="btn btn-secondary btn-small"
-                      style={{ background: 'rgba(245, 158, 11, 0.1)', color: '#f59e0b', borderColor: 'rgba(245,158,11,0.2)', width: '100%' }}
+                      style={{ color: 'var(--warning)', borderColor: 'rgba(180,83,9,0.3)', width: '100%' }}
                     >
                       <Calendar size={14} /> Salva evento nel calendario
                     </button>
@@ -283,11 +275,20 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
                 {/* Time Windows / Intake Status */}
                 <div className="drug-windows-section">
-                  <h4 className="drug-windows-title">Fasce Orarie Oggi</h4>
-                  
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.5rem', marginBottom: '0.75rem' }}>
+                    <h4 className="drug-windows-title" style={{ marginBottom: 0 }}>Fasce Orarie Oggi</h4>
+                    <button
+                      onClick={() => onNavigate('time-windows', { drugId: drug.id })}
+                      className="btn btn-secondary btn-small"
+                      style={{ padding: '0.25rem 0.6rem', minHeight: 32, fontSize: '0.75rem' }}
+                    >
+                      <Edit2 size={12} /> {windows.length === 0 ? 'Aggiungi' : 'Modifica'}
+                    </button>
+                  </div>
+                   
                   {windows.length === 0 ? (
                     <p className="text-muted" style={{ fontSize: '0.85rem', fontStyle: 'italic' }}>
-                      Nessuna fascia oraria configurata. Clicca su modifica per aggiungerle.
+                      Nessuna fascia oraria configurata. Usa "Aggiungi" per crearne una.
                     </p>
                   ) : (
                     <div className="windows-grid">
